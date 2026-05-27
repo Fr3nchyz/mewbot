@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: API key not hardcoded
+        run: |
+          if grep -rn 'sk-ant-' src/ api/; then
+            echo "::error::Anthropic API key found in source — use ANTHROPIC_API_KEY env var"
+            exit 1
+          fi
+          echo "✓ No hardcoded API keys"
+
+      - name: Proxy routes through /api/oracle
+        run: |
+          if grep -rn 'api.anthropic.com' src/; then
+            echo "::error::Direct Anthropic call found in frontend — must route via /api/oracle"
+            exit 1
+          fi
+          echo "✓ All Anthropic calls proxied server-side"
+
+      - name: Snapshot info
+        run: |
+          echo "### Build snapshot" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Time: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To roll back: Vercel dashboard → Deployments → promote any previous build." >> $GITHUB_STEP_SUMMARY

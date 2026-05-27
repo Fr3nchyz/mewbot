@@ -1352,7 +1352,7 @@ function TierRow({ tier, abs, highlighted, isMobile }) {
 }
 
 // ─── ORACLE OUTPUT ────────────────────────────────────────────
-function OracleOutput({ text, onClear, isMobile }) {
+function OracleOutput({ text, streaming, onClear, isMobile }) {
   const lines = text.split("\n");
   return (
     <div style={{ padding:isMobile?"12px 14px":"10px 14px" }}>
@@ -1370,7 +1370,8 @@ function OracleOutput({ text, onClear, isMobile }) {
         const parts=line.split(/(\*\*[^*]+\*\*)/g);
         return <div key={i} style={{ color:"#64748b",fontSize:isMobile?13:11,lineHeight:1.6,marginBottom:2 }}>{parts.map((p,j)=>p.startsWith("**")&&p.endsWith("**")?<span key={j} style={{ color:"#cbd5e1",fontWeight:700 }}>{p.slice(2,-2)}</span>:p)}</div>;
       })}
-      <button onClick={onClear} style={{ marginTop:16,width:"100%",padding:isMobile?10:7,borderRadius:6,background:"transparent",border:"1px solid #1e293b",color:"#334155",fontSize:11,letterSpacing:"1px",cursor:"pointer",fontFamily:"inherit" }}>↺ NEW QUERY</button>
+      {streaming&&<span style={{ display:"inline-block",width:8,height:14,background:"#ff9d00",marginLeft:3,verticalAlign:"middle",animation:"pulse 0.8s ease-in-out infinite",borderRadius:1 }}/>}
+      {onClear&&<button onClick={onClear} style={{ marginTop:16,width:"100%",padding:isMobile?10:7,borderRadius:6,background:"transparent",border:"1px solid #1e293b",color:"#334155",fontSize:11,letterSpacing:"1px",cursor:"pointer",fontFamily:"inherit" }}>↺ NEW QUERY</button>}
     </div>
   );
 }
@@ -1383,7 +1384,7 @@ function OracleTab({ activeClass, isMobile }) {
   const [crossClass, setCrossClass] = useState(false);
   const [context, setContext] = useState("");
   const [oracleText, setOracleText] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -1403,23 +1404,58 @@ function OracleTab({ activeClass, isMobile }) {
 
   const handleConsult = async () => {
     if(!picks.length) return;
-    setLoading(true); setOracleText(null);
+    setStreaming(true);
+    setOracleText("");
     try {
-      const res = await fetch("/api/oracle",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({ model:"claude-sonnet-4-6",max_tokens:1000,
-          system:buildPrompt(activeClass,picks),
-          messages:[{role:"user",content:`Analyze my ${activeClass} draft picks:\n${picks.map(p=>`- ${p.name} (${p.cls})`).join("\n")}${context?`\nContext: ${context}`:""}`}] }),
+      const res = await fetch("/api/oracle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          system: buildPrompt(activeClass, picks),
+          messages: [{ role: "user", content: `Analyze my ${activeClass} draft picks:\n${picks.map(p=>`- ${p.name} (${p.cls})`).join("\n")}${context?`\nContext: ${context}`:""}` }],
+        }),
       });
-      const data=await res.json();
-      setOracleText(data.content?.map(b=>b.text||"").join("\n")||"Mewbot is silent...");
-    } catch { setOracleText("Connection failed."); }
-    setLoading(false);
+      if(!res.ok || !res.body) throw new Error("stream failed");
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let full = "";
+      while(true) {
+        const { done, value } = await reader.read();
+        if(done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop(); // keep incomplete line
+        for(const line of lines) {
+          if(!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if(raw === "[DONE]") continue;
+          try {
+            const ev = JSON.parse(raw);
+            if(ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
+              full += ev.delta.text;
+              setOracleText(full);
+            }
+          } catch { /* partial JSON, skip */ }
+        }
+      }
+      if(!full) setOracleText("Mewbot is silent...");
+    } catch {
+      setOracleText("Connection failed.");
+    }
+    setStreaming(false);
   };
 
   const handleClear = () => { setOracleText(null); setPicks([]); setQuery(""); setContext(""); };
 
-  if(oracleText) return <div style={{ flex:1,overflowY:"auto" }}><OracleOutput text={oracleText} onClear={handleClear} isMobile={isMobile}/></div>;
+  // Show output panel as soon as streaming starts (text builds up live)
+  if(oracleText !== null) return (
+    <div style={{ flex:1,overflowY:"auto" }}>
+      <OracleOutput text={oracleText} streaming={streaming} onClear={!streaming ? handleClear : null} isMobile={isMobile}/>
+    </div>
+  );
 
   return (
     <div style={{ flex:1,display:"flex",flexDirection:"column",overflow:"hidden" }}>
@@ -1507,15 +1543,14 @@ function OracleTab({ activeClass, isMobile }) {
           <>
             <input value={context} onChange={e=>setContext(e.target.value)} placeholder="Context — Act, party, existing build..."
               style={{ width:"100%",marginTop:8,background:"#0d1117",border:"1px solid #0f172a",borderRadius:6,padding:isMobile?"10px 12px":"7px 10px",color:"#475569",fontSize:isMobile?13:11,outline:"none",fontFamily:"inherit" }}/>
-            <button onClick={handleConsult} disabled={loading}
-              style={{ width:"100%",marginTop:10,padding:isMobile?13:9,borderRadius:7,cursor:loading?"not-allowed":"pointer",
+            <button onClick={handleConsult} disabled={streaming}
+              style={{ width:"100%",marginTop:10,padding:isMobile?13:9,borderRadius:7,cursor:streaming?"not-allowed":"pointer",
                 background:"rgba(255,157,0,0.14)",border:"1px solid rgba(255,157,0,0.45)",color:"#ff9d00",
                 fontFamily:"inherit",fontWeight:700,fontSize:isMobile?13:11,letterSpacing:"2px",transition:"all 0.15s" }}>
-              {loading?"⟳ ASKING...":"🔮 ASK MEWBOT"}
+              {streaming?"⟳ ASKING...":"🔮 ASK MEWBOT"}
             </button>
           </>
         )}
-        {loading&&<div style={{ padding:"14px",display:"flex",alignItems:"center",gap:10 }}><div style={{ width:8,height:8,borderRadius:"50%",background:"#ff9d00",animation:"pulse 1s ease-in-out infinite" }}/><span style={{ color:"#ff9d00",fontSize:11,letterSpacing:"1px" }}>MEWBOT ANALYZING...</span></div>}
       </div>
     </div>
   );
